@@ -1,0 +1,408 @@
+/* ------------------------------------------------------------------------- *
+ * openapi2rpc-ts runtime
+ * gRPC-style primitives (status codes, errors, call options, interceptors)
+ * on top of plain HTTP/JSON via fetch.
+ * ------------------------------------------------------------------------- */
+
+/** gRPC status codes (https://grpc.github.io/grpc/core/md_doc_statuscodes.html). */
+export const Code = {
+  OK: 0,
+  CANCELLED: 1,
+  UNKNOWN: 2,
+  INVALID_ARGUMENT: 3,
+  DEADLINE_EXCEEDED: 4,
+  NOT_FOUND: 5,
+  ALREADY_EXISTS: 6,
+  PERMISSION_DENIED: 7,
+  RESOURCE_EXHAUSTED: 8,
+  FAILED_PRECONDITION: 9,
+  ABORTED: 10,
+  OUT_OF_RANGE: 11,
+  UNIMPLEMENTED: 12,
+  INTERNAL: 13,
+  UNAVAILABLE: 14,
+  DATA_LOSS: 15,
+  UNAUTHENTICATED: 16,
+} as const;
+export type Code = (typeof Code)[keyof typeof Code];
+
+/** Returns the symbolic name of a status code, e.g. `NOT_FOUND`. */
+export function codeName(code: Code): string {
+  for (const [name, value] of Object.entries(Code)) {
+    if (value === code) return name;
+  }
+  return 'UNKNOWN';
+}
+
+/** Maps an HTTP status to the closest gRPC status code. */
+export function codeFromHttpStatus(status: number): Code {
+  switch (status) {
+    case 400: return Code.INVALID_ARGUMENT;
+    case 401: return Code.UNAUTHENTICATED;
+    case 403: return Code.PERMISSION_DENIED;
+    case 404: return Code.NOT_FOUND;
+    case 408: return Code.DEADLINE_EXCEEDED;
+    case 409: return Code.ABORTED;
+    case 412: return Code.FAILED_PRECONDITION;
+    case 416: return Code.OUT_OF_RANGE;
+    case 429: return Code.RESOURCE_EXHAUSTED;
+    case 499: return Code.CANCELLED;
+    case 501: return Code.UNIMPLEMENTED;
+    case 502: return Code.UNAVAILABLE;
+    case 503: return Code.UNAVAILABLE;
+    case 504: return Code.DEADLINE_EXCEEDED;
+  }
+  if (status >= 200 && status < 300) return Code.OK;
+  if (status >= 500) return Code.INTERNAL;
+  if (status >= 400) return Code.FAILED_PRECONDITION;
+  return Code.UNKNOWN;
+}
+
+/** Request/response headers, the equivalent of gRPC metadata. */
+export type Metadata = Record<string, string>;
+
+/** The equivalent of `google.protobuf.Empty`. */
+export type Empty = Record<string, never>;
+
+export interface RpcErrorInit {
+  httpStatus?: number;
+  /** Decoded error response body (JSON when possible, otherwise text). */
+  details?: unknown;
+  /** Response headers. */
+  metadata?: Metadata;
+  cause?: unknown;
+}
+
+/** Error thrown by every RPC call. Check `code` instead of the HTTP status. */
+export class RpcError extends Error {
+  readonly code: Code;
+  readonly httpStatus: number | undefined;
+  readonly details: unknown;
+  readonly metadata: Metadata;
+
+  constructor(code: Code, message: string, init: RpcErrorInit = {}) {
+    super(message, init.cause === undefined ? undefined : { cause: init.cause });
+    this.name = 'RpcError';
+    this.code = code;
+    this.httpStatus = init.httpStatus;
+    this.details = init.details;
+    this.metadata = init.metadata ?? {};
+  }
+
+  get codeName(): string {
+    return codeName(this.code);
+  }
+}
+
+export type HttpMethod = 'GET' | 'PUT' | 'POST' | 'DELETE' | 'OPTIONS' | 'HEAD' | 'PATCH' | 'TRACE';
+
+/** Maps a field of the request message to an HTTP parameter. */
+export interface ParamDescriptor {
+  readonly field: string;
+  readonly name: string;
+  readonly in: 'path' | 'query' | 'header' | 'cookie';
+}
+
+/** Maps a field of the request message to the HTTP request body. */
+export interface BodyDescriptor {
+  readonly field: string;
+  readonly contentType: string;
+  readonly encoding: 'json' | 'form' | 'multipart' | 'text' | 'binary';
+}
+
+export interface ResponseDescriptor {
+  readonly encoding: 'json' | 'text' | 'binary' | 'none';
+}
+
+/** Describes how one RPC method is transcoded to HTTP. */
+export interface MethodDescriptor {
+  readonly service: string;
+  readonly name: string;
+  readonly httpMethod: HttpMethod;
+  readonly path: string;
+  readonly params: readonly ParamDescriptor[];
+  readonly body?: BodyDescriptor;
+  readonly response: ResponseDescriptor;
+}
+
+export interface ServiceDefinition {
+  readonly typeName: string;
+  readonly methods: { readonly [name: string]: MethodDescriptor };
+}
+
+/** Per-call options, like gRPC CallOptions. */
+export interface CallOptions {
+  /** Extra headers for this call. */
+  metadata?: Metadata;
+  /** Cancels the call; the call then fails with `Code.CANCELLED`. */
+  signal?: AbortSignal;
+  /** Deadline in milliseconds; the call then fails with `Code.DEADLINE_EXCEEDED`. */
+  timeoutMs?: number;
+}
+
+export interface UnaryRequest {
+  readonly method: MethodDescriptor;
+  readonly message: unknown;
+  metadata: Metadata;
+  readonly signal: AbortSignal | undefined;
+}
+
+export interface UnaryResponse {
+  readonly message: unknown;
+  readonly metadata: Metadata;
+  readonly httpStatus: number;
+}
+
+export type UnaryCall = (request: UnaryRequest) => Promise<UnaryResponse>;
+
+/**
+ * Wraps a call, like a gRPC client interceptor.
+ * The first interceptor in the list is the outermost one.
+ *
+ * @example
+ * const auth: Interceptor = (next) => async (req) => {
+ *   req.metadata = { ...req.metadata, authorization: `Bearer ${token}` };
+ *   return next(req);
+ * };
+ */
+export type Interceptor = (next: UnaryCall) => UnaryCall;
+
+/** Sends unary calls. Implement it yourself for tests or custom protocols. */
+export interface Transport {
+  unary<Req, Res>(method: MethodDescriptor, request: Req, options?: CallOptions): Promise<Res>;
+}
+
+export interface FetchTransportOptions {
+  /** Base URL that method paths are appended to, e.g. `https://api.example.com/v1`. */
+  baseUrl: string;
+  /** Custom fetch implementation (defaults to `globalThis.fetch`). */
+  fetch?: (input: string, init: RequestInit) => Promise<Response>;
+  /** Headers sent with every call; a function is evaluated per call. */
+  metadata?: Metadata | (() => Metadata | Promise<Metadata>);
+  interceptors?: readonly Interceptor[];
+}
+
+/** Creates a Transport that transcodes calls to HTTP/JSON with fetch. */
+export function createFetchTransport(options: FetchTransportOptions): Transport {
+  const fetchImpl = options.fetch ?? ((input: string, init: RequestInit) => globalThis.fetch(input, init));
+  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+
+  const send: UnaryCall = async (req) => {
+    try {
+      const { url, init } = rpcBuildHttpRequest(baseUrl, req);
+      const res = await fetchImpl(url, init);
+      return await rpcDecodeResponse(req.method, res);
+    } catch (err) {
+      if (err instanceof RpcError) throw err;
+      if (req.signal?.aborted) {
+        const reason: unknown = req.signal.reason;
+        throw reason instanceof RpcError ? reason : new RpcError(Code.CANCELLED, 'call cancelled', { cause: reason });
+      }
+      throw new RpcError(Code.UNAVAILABLE, err instanceof Error ? err.message : String(err), { cause: err });
+    }
+  };
+  const call = (options.interceptors ?? []).reduceRight<UnaryCall>((next, interceptor) => interceptor(next), send);
+
+  return {
+    async unary<Req, Res>(method: MethodDescriptor, request: Req, callOptions: CallOptions = {}): Promise<Res> {
+      const defaults = typeof options.metadata === 'function' ? await options.metadata() : options.metadata ?? {};
+      const deadline = rpcWithDeadline(callOptions.signal, callOptions.timeoutMs);
+      try {
+        const res = await call({
+          method,
+          message: request,
+          metadata: { ...defaults, ...callOptions.metadata },
+          signal: deadline.signal,
+        });
+        return res.message as Res;
+      } finally {
+        deadline.cleanup();
+      }
+    },
+  };
+}
+
+function rpcWithDeadline(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; cleanup: () => void } {
+  if (signal === undefined && timeoutMs === undefined) return { signal: undefined, cleanup: () => {} };
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(new RpcError(Code.CANCELLED, 'call cancelled', { cause: signal?.reason }));
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const timer = timeoutMs === undefined
+    ? undefined
+    : setTimeout(() => controller.abort(new RpcError(Code.DEADLINE_EXCEEDED, `deadline exceeded after ${timeoutMs}ms`)), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+function rpcSerializeScalar(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+  return String(value);
+}
+
+function rpcAppendParam(params: URLSearchParams, name: string, value: unknown): void {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+    for (const v of value) rpcAppendParam(params, name, v);
+  } else if (typeof value === 'object' && !(value instanceof Date)) {
+    // OpenAPI default for objects: style=form, explode=true
+    for (const [k, v] of Object.entries(value)) rpcAppendParam(params, k, v);
+  } else {
+    params.append(name, rpcSerializeScalar(value));
+  }
+}
+
+function rpcBuildHttpRequest(baseUrl: string, req: UnaryRequest): { url: string; init: RequestInit } {
+  const { method } = req;
+  const message = (req.message ?? {}) as Record<string, unknown>;
+  const headers = new Headers(req.metadata);
+  const query = new URLSearchParams();
+  const cookies: string[] = [];
+  let path = method.path;
+
+  for (const p of method.params) {
+    const value = message[p.field];
+    if (value === undefined || value === null) {
+      if (p.in === 'path') throw new RpcError(Code.INVALID_ARGUMENT, `missing path parameter "${p.name}"`);
+      continue;
+    }
+    const flat = Array.isArray(value) ? value.map(rpcSerializeScalar).join(',') : rpcSerializeScalar(value);
+    switch (p.in) {
+      case 'path':
+        path = path.split(`{${p.name}}`).join(encodeURIComponent(flat));
+        break;
+      case 'query':
+        rpcAppendParam(query, p.name, value);
+        break;
+      case 'header':
+        headers.set(p.name, flat);
+        break;
+      case 'cookie':
+        cookies.push(`${p.name}=${encodeURIComponent(flat)}`);
+        break;
+    }
+  }
+  if (cookies.length > 0) headers.append('cookie', cookies.join('; '));
+
+  let body: BodyInit | undefined;
+  const bodyDesc = method.body;
+  const bodyValue = bodyDesc ? message[bodyDesc.field] : undefined;
+  if (bodyDesc && bodyValue !== undefined) {
+    switch (bodyDesc.encoding) {
+      case 'json':
+        body = JSON.stringify(bodyValue);
+        headers.set('content-type', bodyDesc.contentType);
+        break;
+      case 'form': {
+        const form = new URLSearchParams();
+        for (const [k, v] of Object.entries(bodyValue as Record<string, unknown>)) rpcAppendParam(form, k, v);
+        body = form;
+        break;
+      }
+      case 'multipart': {
+        const form = new FormData();
+        for (const [k, v] of Object.entries(bodyValue as Record<string, unknown>)) {
+          for (const item of Array.isArray(v) ? v : [v]) {
+            if (item === undefined || item === null) continue;
+            if (item instanceof Blob) form.append(k, item);
+            else form.append(k, rpcSerializeScalar(item));
+          }
+        }
+        body = form; // fetch sets the multipart boundary itself
+        break;
+      }
+      case 'text':
+        body = String(bodyValue);
+        headers.set('content-type', bodyDesc.contentType);
+        break;
+      case 'binary':
+        body = bodyValue as BodyInit;
+        headers.set('content-type', bodyDesc.contentType);
+        break;
+    }
+  }
+  if (method.response.encoding === 'json' && !headers.has('accept')) headers.set('accept', 'application/json');
+
+  const qs = query.toString();
+  return {
+    url: baseUrl + path + (qs ? `?${qs}` : ''),
+    init: { method: method.httpMethod, headers, body: body ?? null, signal: req.signal ?? null },
+  };
+}
+
+function rpcHeadersToMetadata(headers: Headers): Metadata {
+  const out: Metadata = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
+function rpcErrorMessage(details: unknown): string | undefined {
+  if (typeof details === 'string') return details.trim() || undefined;
+  if (typeof details !== 'object' || details === null) return undefined;
+  const d = details as Record<string, unknown>;
+  for (const key of ['message', 'detail', 'title', 'error_description', 'error']) {
+    const v = d[key];
+    if (typeof v === 'string' && v) return v;
+    if (key === 'error' && typeof v === 'object' && v !== null) {
+      const nested = (v as Record<string, unknown>)['message'];
+      if (typeof nested === 'string' && nested) return nested;
+    }
+  }
+  return undefined;
+}
+
+async function rpcDecodeResponse(method: MethodDescriptor, res: Response): Promise<UnaryResponse> {
+  const metadata = rpcHeadersToMetadata(res.headers);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let details: unknown = text || undefined;
+    try {
+      if (text) details = JSON.parse(text);
+    } catch {
+      // keep the raw text
+    }
+    const message = rpcErrorMessage(details) ?? `HTTP ${res.status} ${res.statusText}`.trim();
+    throw new RpcError(codeFromHttpStatus(res.status), message, { httpStatus: res.status, details, metadata });
+  }
+
+  let message: unknown;
+  switch (method.response.encoding) {
+    case 'none':
+      message = {};
+      break;
+    case 'json': {
+      const text = await res.text();
+      try {
+        message = text ? JSON.parse(text) : {};
+      } catch (err) {
+        throw new RpcError(Code.INTERNAL, 'failed to decode JSON response', {
+          httpStatus: res.status,
+          details: text,
+          metadata,
+          cause: err,
+        });
+      }
+      break;
+    }
+    case 'text':
+      message = await res.text();
+      break;
+    case 'binary':
+      message = await res.blob();
+      break;
+  }
+  return { message, metadata, httpStatus: res.status };
+}
