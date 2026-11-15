@@ -1,0 +1,321 @@
+openapi: 3.0.3
+info:
+  title: Todo API
+  version: 1.0.0
+  description: プロジェクトとタスクを管理するシンプルな TODO アプリの API
+servers:
+  - url: https://api.example.com/v1
+tags:
+  - name: projects
+    description: プロジェクトの管理
+  - name: tasks
+    description: タスクの管理
+paths:
+  /projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: プロジェクト一覧を取得する
+      parameters:
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: プロジェクトの一覧
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListProjectsPage' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: プロジェクトを作成する
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectInput' }
+      responses:
+        '201':
+          description: 作成したプロジェクト
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: プロジェクトを取得する
+      responses:
+        '200':
+          description: プロジェクト
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      summary: プロジェクトを削除する
+      description: プロジェクト内のタスクもすべて削除されます。
+      responses:
+        '204':
+          description: 削除しました
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{projectId}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [tasks]
+      operationId: listTasks
+      summary: タスク一覧を取得する
+      parameters:
+        - name: status
+          in: query
+          description: 状態で絞り込む（複数指定可）
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/TaskStatus' }
+        - name: assignee
+          in: query
+          description: 担当者のユーザー ID で絞り込む
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [created_at, due_date, priority]
+            default: created_at
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/PageToken'
+      responses:
+        '200':
+          description: タスクの一覧
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListTasksPage' }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [tasks]
+      operationId: createTask
+      summary: タスクを作成する
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          description: 同じキーでの再送は 1 回だけ処理されます
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskInput' }
+      responses:
+        '201':
+          description: 作成したタスク
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      operationId: getTask
+      summary: タスクを取得する
+      responses:
+        '200':
+          description: タスク
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [tasks]
+      operationId: updateTask
+      summary: タスクを部分更新する
+      description: 指定したフィールドだけを更新します。`dueDate` に null を送ると期限を外せます。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskPatch' }
+      responses:
+        '200':
+          description: 更新後のタスク
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [tasks]
+      operationId: deleteTask
+      summary: タスクを削除する
+      responses:
+        '204':
+          description: 削除しました
+        default: { $ref: '#/components/responses/Error' }
+  /tasks/{taskId}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      operationId: uploadAttachment
+      summary: タスクにファイルを添付する
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                comment: { type: string }
+      responses:
+        '201':
+          description: 添付したファイル
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Attachment' }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string }
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string }
+    PageSize:
+      name: page_size
+      in: query
+      description: 1 ページの件数（1〜100）
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PageToken:
+      name: page_token
+      in: query
+      description: 前のレスポンスの next_page_token
+      schema: { type: string }
+  responses:
+    Error:
+      description: エラー
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Project:
+      type: object
+      required: [id, name, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        createdAt: { type: string, format: date-time }
+    ProjectInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        description: { type: string }
+    TaskStatus:
+      type: string
+      description: タスクの状態
+      enum: [todo, in_progress, done]
+    Priority:
+      type: integer
+      description: 優先度（1 が最も高い）
+      enum: [1, 2, 3]
+    Task:
+      type: object
+      required: [id, projectId, title, status, priority, labels, createdAt]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        title: { type: string }
+        notes: { type: string }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        assignee:
+          description: 担当者（未割り当てなら null）
+          allOf: [{ $ref: '#/components/schemas/User' }]
+          nullable: true
+        dueDate: { type: string, format: date, nullable: true }
+        labels:
+          type: array
+          items: { type: string }
+        attachments:
+          type: array
+          items: { $ref: '#/components/schemas/Attachment' }
+        createdAt: { type: string, format: date-time }
+    TaskInput:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, maxLength: 200 }
+        notes: { type: string }
+        priority: { $ref: '#/components/schemas/Priority' }
+        assigneeId: { type: string }
+        dueDate: { type: string, format: date }
+        labels:
+          type: array
+          items: { type: string }
+    TaskPatch:
+      type: object
+      properties:
+        title: { type: string }
+        notes: { type: string }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        assigneeId: { type: string, nullable: true }
+        dueDate: { type: string, format: date, nullable: true }
+        labels:
+          type: array
+          items: { type: string }
+    User:
+      type: object
+      required: [id, displayName]
+      properties:
+        id: { type: string }
+        displayName: { type: string }
+        avatarUrl: { type: string, format: uri }
+    Attachment:
+      type: object
+      required: [id, fileName, url, size]
+      properties:
+        id: { type: string }
+        fileName: { type: string }
+        url: { type: string, format: uri }
+        size: { type: integer, description: バイト数 }
+    ListProjectsPage:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items: { $ref: '#/components/schemas/Project' }
+        next_page_token: { type: string }
+    ListTasksPage:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items: { $ref: '#/components/schemas/Task' }
+        next_page_token: { type: string }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, description: 'エラーの種類（例: not_found）' }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
