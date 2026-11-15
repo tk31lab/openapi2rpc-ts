@@ -71,6 +71,7 @@ npx openapi2rpc-ts -i openapi.yaml -o src/gen/api.ts
 | `--runtime-import <module>` | ランタイムを埋め込まず、指定モジュールから import する |
 | `--emit-runtime <file>` | ランタイムを別ファイルとして書き出す |
 | `--object-style <style>` | object 型を `interface`（デフォルト）と `type` のどちらで宣言するか |
+| `--validate` | JSON レスポンスがスキーマどおりかを実行時にチェックする |
 
 デフォルトでは、ランタイム（`Code` / `RpcError` / `createFetchTransport` など）を生成ファイルに埋め込みます。そのため、出力ファイルは 1 つで完結し、実行時の依存パッケージもありません。
 
@@ -116,6 +117,38 @@ export interface PetsService {
   // ...
 }
 ```
+
+### レスポンスの検証（`--validate`）
+
+デフォルトでは、レスポンスの JSON をパースした結果を、そのまま生成した型（`GetTaskResponse` など）として返します。サーバーが定義と違うデータを返しても気づけません。
+
+`--validate` を付けると、スキーマを生成コードに埋め込み、JSON レスポンスを毎回チェックします。実行時に必要なパッケージは増えません。合わなければ `Code.INTERNAL` の `RpcError` になります。
+
+```ts
+try {
+  await tasks.getTask({ taskId: 't1' });
+} catch (err) {
+  if (err instanceof RpcError && err.code === Code.INTERNAL) {
+    console.log(err.message);
+    // invalid response from TasksService.getTask: $.title: required (and 1 more)
+    console.log(err.details); // { issues: [{ path: '$.title', message: 'required' }, ...], body: { ...受け取った JSON } }
+  }
+}
+```
+
+- **チェックするもの**：型、`required`、`enum` / `const`、null を許すか（`nullable` / `type: [.., "null"]`）、配列とネスト、`allOf` / `oneOf` / `anyOf`
+- **チェックしないもの**：`maxLength` や `minimum` のような値の制約、`format`（`date-time` が正しい日付かなど）
+- **定義にないフィールド**：無視します（`additionalProperties: false` でも）。protobuf の未知フィールドと同じで、サーバー側がフィールドを追加してもクライアントが壊れないようにするためです。
+- **`oneOf`**：どれか 1 つに合えば OK とします（TypeScript の union と同じ扱い）。
+- **チェックの対象**：成功した JSON レスポンスだけです。エラーレスポンス・テキスト・バイナリはチェックしません。
+
+本番では止めたいときなど、トランスポートごとに無効にできます。
+
+```ts
+createFetchTransport({ baseUrl, validateResponses: false });
+```
+
+検証関数 `validateValue(value, schema, defs)` はランタイムから export しているので、単体でも使えます。
 
 ### `interface` と `type` の切り替え（`--object-style`）
 
@@ -234,7 +267,7 @@ npm install
 npm test          # vitest（スナップショット、生成コードの型チェック、ランタイムの動作）
 npm run typecheck
 npm run build
-npm run generate:example   # test/fixtures/petstore.generated.ts を作り直す
+npm run generate:example   # test/fixtures と examples の生成結果を作り直す
 ```
 
 スナップショットを更新するときは `npx vitest run -u` を実行します。

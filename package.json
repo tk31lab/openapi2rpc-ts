@@ -26,7 +26,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "generate:example": "npm run build && node dist/cli.js -i test/fixtures/petstore.yaml -o test/fixtures/petstore.generated.ts"
+    "generate:example": "npm run build && node dist/cli.js -i test/fixtures/petstore.yaml -o test/fixtures/petstore.generated.ts && node dist/cli.js -i test/fixtures/petstore.yaml --validate -o test/fixtures/petstore.validate.generated.ts && node dist/cli.js -i examples/todo/openapi.yaml -o examples/todo/todo.generated.ts"
   },
   "keywords": [
     "openapi",

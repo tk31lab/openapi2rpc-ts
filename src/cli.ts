@@ -14,6 +14,7 @@ Options:
       --runtime-import <module> Import the runtime from <module> instead of embedding it
       --emit-runtime <file>     Write the runtime to <file> (use with --runtime-import)
       --object-style <style>    Declare object types as "interface" (default) or "type"
+      --validate                Check JSON responses against the schema at runtime
   -h, --help                    Show this help
 `;
 
@@ -32,6 +33,7 @@ function main(): number {
         'runtime-import': { type: 'string' },
         'emit-runtime': { type: 'string' },
         'object-style': { type: 'string' },
+        validate: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
     }).values;
@@ -58,7 +60,7 @@ function main(): number {
   const text = readFileSync(args.input === '-' ? 0 : args.input, 'utf8');
   let result;
   try {
-    result = generateFromText(text, { runtimeImport: args['runtime-import'], objectStyle });
+    result = generateFromText(text, { runtimeImport: args['runtime-import'], objectStyle, validate: args.validate ?? false });
   } catch (err) {
     process.stderr.write(`openapi2rpc-ts: ${(err as Error).message}\n`);
     return 1;

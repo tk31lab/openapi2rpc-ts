@@ -24,6 +24,32 @@ describe('generate', () => {
     expect(typecheck({ 'client.ts': code, 'runtime.ts': runtimeSource() })).toEqual([]);
   });
 
+  describe('validate', () => {
+    it('matches the petstore --validate snapshot', async () => {
+      const { code, warnings } = generateFromText(petstore, { validate: true });
+      expect(warnings).toEqual([]);
+      await expect(code).toMatchFileSnapshot('./fixtures/petstore.validate.generated.ts');
+    });
+
+    it('passes strict type-checking (embedded and imported runtime)', () => {
+      expect(typecheck({ 'client.ts': generateFromText(petstore, { validate: true }).code })).toEqual([]);
+      const { code } = generateFromText(petstore, { validate: true, runtimeImport: './runtime.js' });
+      expect(code).toContain("import { validateValue, type CallOptions");
+      expect(typecheck({ 'client.ts': code, 'runtime.ts': runtimeSource() })).toEqual([]);
+    });
+
+    it('only adds validators to JSON responses', () => {
+      const { code } = generateFromText(petstore, { validate: true });
+      expect(code).toContain('validate: (value: unknown) => validateValue(value, {"$ref":"Pet"}, rpcSchemas),');
+      expect(code).toMatch(/name: 'deletePet',[\s\S]*?response: \{ encoding: 'none' \},/);
+      expect(code).toMatch(/name: 'postPetsPhotoByPetId',[\s\S]*?response: \{ encoding: 'text' \},/);
+    });
+
+    it('is off by default', () => {
+      expect(generateFromText(petstore).code).not.toContain('rpcSchemas');
+    });
+  });
+
   describe('objectStyle', () => {
     // a generic helper that only accepts index-signature-compatible objects
     const usage = `import type { Pet, GetPetRequest, GetInventoryRequest, StoreService } from './client.js';
@@ -45,7 +71,9 @@ export { empty, svc };
       expect(code).toContain('export type GetInventoryRequest = Record<string, never>;');
       expect(code).toContain('export type PetsService = {\n');
       expect(code).toContain('export class PetsServiceClient implements PetsService {');
-      expect(code).not.toMatch(/^export interface (?!RpcErrorInit|ParamDescriptor|BodyDescriptor|ResponseDescriptor|MethodDescriptor|ServiceDefinition|CallOptions|UnaryRequest|UnaryResponse|Transport|FetchTransportOptions)/m);
+      // without the embedded runtime, no generated declaration is an interface
+      const generatedOnly = generateFromText(petstore, { objectStyle: 'type', runtimeImport: './runtime.js' }).code;
+      expect(generatedOnly).not.toMatch(/^export interface /m);
       expect(typecheck({ 'client.ts': code, 'usage.ts': usage })).toEqual([]);
     });
 

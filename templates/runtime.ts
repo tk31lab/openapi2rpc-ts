@@ -112,6 +112,8 @@ export interface BodyDescriptor {
 
 export interface ResponseDescriptor {
   readonly encoding: 'json' | 'text' | 'binary' | 'none';
+  /** Checks a decoded JSON response (generated with `--validate`). */
+  readonly validate?: (value: unknown) => readonly ValidationIssue[];
 }
 
 /** Describes how one RPC method is transcoded to HTTP. */
@@ -180,6 +182,11 @@ export interface FetchTransportOptions {
   /** Headers sent with every call; a function is evaluated per call. */
   metadata?: Metadata | (() => Metadata | Promise<Metadata>);
   interceptors?: readonly Interceptor[];
+  /**
+   * Check JSON responses against the OpenAPI schema when the client was generated with
+   * `--validate` (default: true). A mismatch fails the call with `Code.INTERNAL`.
+   */
+  validateResponses?: boolean;
 }
 
 /** Creates a Transport that transcodes calls to HTTP/JSON with fetch. */
@@ -191,7 +198,7 @@ export function createFetchTransport(options: FetchTransportOptions): Transport 
     try {
       const { url, init } = rpcBuildHttpRequest(baseUrl, req);
       const res = await fetchImpl(url, init);
-      return await rpcDecodeResponse(req.method, res);
+      return await rpcDecodeResponse(req.method, res, options.validateResponses ?? true);
     } catch (err) {
       if (err instanceof RpcError) throw err;
       if (req.signal?.aborted) {
@@ -364,7 +371,7 @@ function rpcErrorMessage(details: unknown): string | undefined {
   return undefined;
 }
 
-async function rpcDecodeResponse(method: MethodDescriptor, res: Response): Promise<UnaryResponse> {
+async function rpcDecodeResponse(method: MethodDescriptor, res: Response, validate: boolean): Promise<UnaryResponse> {
   const metadata = rpcHeadersToMetadata(res.headers);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -395,6 +402,16 @@ async function rpcDecodeResponse(method: MethodDescriptor, res: Response): Promi
           cause: err,
         });
       }
+      const issues = validate && method.response.validate ? method.response.validate(message) : [];
+      if (issues.length > 0) {
+        const first = issues[0]!;
+        throw new RpcError(
+          Code.INTERNAL,
+          `invalid response from ${method.service}.${method.name}: ${first.path}: ${first.message}` +
+            (issues.length > 1 ? ` (and ${issues.length - 1} more)` : ''),
+          { httpStatus: res.status, details: { issues, body: message }, metadata },
+        );
+      }
       break;
     }
     case 'text':
@@ -405,4 +422,148 @@ async function rpcDecodeResponse(method: MethodDescriptor, res: Response): Promi
       break;
   }
   return { message, metadata, httpStatus: res.status };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Schema validation (used by clients generated with --validate)
+ * ------------------------------------------------------------------------- */
+
+/** A compact JSON Schema subset produced by the generator. */
+export type JsonSchema =
+  | boolean
+  | {
+      /** name of a schema in the definitions table */
+      readonly $ref?: string;
+      readonly type?: readonly string[];
+      readonly enum?: readonly unknown[];
+      readonly const?: unknown;
+      readonly properties?: { readonly [name: string]: JsonSchema };
+      readonly required?: readonly string[];
+      readonly items?: JsonSchema;
+      readonly additionalProperties?: JsonSchema;
+      readonly allOf?: readonly JsonSchema[];
+      readonly anyOf?: readonly JsonSchema[];
+    };
+
+export interface ValidationIssue {
+  /** JSONPath-like location, e.g. `$.tasks[0].title` */
+  readonly path: string;
+  readonly message: string;
+}
+
+/**
+ * Checks that `value` has the shape described by `schema`.
+ * Only structure is checked (types, required, enum/const, nesting, unions); value constraints
+ * such as `maxLength` are not. Unknown properties are allowed, like unknown fields in protobuf.
+ */
+export function validateValue(
+  value: unknown,
+  schema: JsonSchema,
+  defs: { readonly [name: string]: JsonSchema } = {},
+  maxIssues = 10,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  rpcCheck(value, schema, defs, '$', issues, maxIssues, 0);
+  return issues;
+}
+
+function rpcDescribe(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'string') return `string ${JSON.stringify(value.length > 30 ? `${value.slice(0, 30)}...` : value)}`;
+  if (typeof value === 'number' || typeof value === 'boolean') return `${typeof value} ${String(value)}`;
+  return typeof value;
+}
+
+function rpcIsType(value: unknown, type: string): boolean {
+  switch (type) {
+    case 'null': return value === null;
+    case 'string': return typeof value === 'string';
+    case 'boolean': return typeof value === 'boolean';
+    case 'number': return typeof value === 'number';
+    case 'integer': return Number.isInteger(value);
+    case 'array': return Array.isArray(value);
+    case 'object': return typeof value === 'object' && value !== null && !Array.isArray(value);
+    default: return true;
+  }
+}
+
+function rpcEqual(a: unknown, b: unknown): boolean {
+  return a === b || (typeof a === 'object' && a !== null && JSON.stringify(a) === JSON.stringify(b));
+}
+
+function rpcChildPath(path: string, key: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
+}
+
+function rpcCheck(
+  value: unknown,
+  schema: JsonSchema,
+  defs: { readonly [name: string]: JsonSchema },
+  path: string,
+  issues: ValidationIssue[],
+  max: number,
+  depth: number,
+): void {
+  if (issues.length >= max || schema === true || depth > 100) return;
+  if (schema === false) {
+    issues.push({ path, message: 'no value is allowed here' });
+    return;
+  }
+  if (schema.$ref !== undefined) {
+    const target = defs[schema.$ref];
+    if (target !== undefined) rpcCheck(value, target, defs, path, issues, max, depth + 1);
+    return;
+  }
+  if ('const' in schema && !rpcEqual(value, schema.const)) {
+    issues.push({ path, message: `expected ${JSON.stringify(schema.const)}, got ${rpcDescribe(value)}` });
+    return;
+  }
+  if (schema.enum && !schema.enum.some((e) => rpcEqual(value, e))) {
+    issues.push({ path, message: `expected one of ${schema.enum.map((e) => JSON.stringify(e)).join(', ')}, got ${rpcDescribe(value)}` });
+    return;
+  }
+  if (schema.type && !schema.type.some((t) => rpcIsType(value, t))) {
+    issues.push({ path, message: value === undefined ? 'required' : `expected ${schema.type.join(' | ')}, got ${rpcDescribe(value)}` });
+    return;
+  }
+  for (const part of schema.allOf ?? []) rpcCheck(value, part, defs, path, issues, max, depth + 1);
+  if (schema.anyOf) {
+    let closest: ValidationIssue[] | undefined;
+    for (const variant of schema.anyOf) {
+      const sub: ValidationIssue[] = [];
+      rpcCheck(value, variant, defs, path, sub, max, depth + 1);
+      if (sub.length === 0) {
+        closest = undefined;
+        break;
+      }
+      if (closest === undefined || sub.length < closest.length) closest = sub;
+    }
+    if (closest !== undefined) {
+      const hint = closest[0];
+      issues.push({
+        path,
+        message: `does not match any of ${schema.anyOf.length} variants` + (hint ? ` (closest: ${hint.path}: ${hint.message})` : ''),
+      });
+      return;
+    }
+  }
+  if (Array.isArray(value)) {
+    if (schema.items !== undefined) {
+      for (let i = 0; i < value.length && issues.length < max; i++) {
+        rpcCheck(value[i], schema.items, defs, `${path}[${i}]`, issues, max, depth + 1);
+      }
+    }
+  } else if (typeof value === 'object' && value !== null) {
+    const obj = value as Record<string, unknown>;
+    for (const name of schema.required ?? []) {
+      if (obj[name] === undefined) issues.push({ path: rpcChildPath(path, name), message: 'required' });
+    }
+    const props = schema.properties ?? {};
+    for (const [name, child] of Object.entries(obj)) {
+      if (child === undefined || issues.length >= max) continue;
+      const propSchema = props[name] ?? schema.additionalProperties;
+      if (propSchema !== undefined) rpcCheck(child, propSchema, defs, rpcChildPath(path, name), issues, max, depth + 1);
+    }
+  }
 }

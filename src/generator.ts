@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { camel, constName, docComment, pascal, propKey, unique, words } from './names.js';
 import { literal, TypeRenderer, typesOf } from './schema.js';
+import { RuntimeSchemaBuilder } from './validation.js';
 import {
   deref,
   HTTP_METHODS,
@@ -25,6 +26,11 @@ export interface GenerateOptions {
    * - `type`: `export type Task = { ... };` — assignable to `Record<string, unknown>`
    */
   objectStyle?: ObjectStyle;
+  /**
+   * Embed the response schemas and check every JSON response against them at runtime.
+   * A mismatch fails the call with `Code.INTERNAL` (see `validateResponses` on the transport).
+   */
+  validate?: boolean;
 }
 
 export type ObjectStyle = 'interface' | 'type';
@@ -99,6 +105,8 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
     schemaNames.set(key, used.has(base) ? unique(used, `${base}Model`) : unique(used, base));
   }
   const types = new TypeRenderer(doc, schemaNames, warn);
+  const validator = options.validate ? new RuntimeSchemaBuilder(doc, schemaNames) : undefined;
+  used.add('rpcSchemas');
 
   // 2. operations -> services / methods
   const services = collectServices(doc, used, warn);
@@ -106,7 +114,9 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
   // 3. emit
   let out = header(doc);
   if (options.runtimeImport) {
-    out += `import type { CallOptions, Empty, ServiceDefinition, Transport } from '${options.runtimeImport}';\n`;
+    out += validator
+      ? `import { validateValue, type CallOptions, type Empty, type JsonSchema, type ServiceDefinition, type Transport } from '${options.runtimeImport}';\n`
+      : `import type { CallOptions, Empty, ServiceDefinition, Transport } from '${options.runtimeImport}';\n`;
     out += `export * from '${options.runtimeImport}';\n\n`;
   } else {
     out += `${runtime.trim()}\n\n`;
@@ -132,11 +142,20 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
     out += '\n';
   }
 
+  if (validator) {
+    out += section('Schemas for response validation (--validate)');
+    out += `const rpcSchemas: { readonly [name: string]: JsonSchema } = {\n`;
+    for (const [key, schema] of schemaEntries) {
+      out += `  ${propKey(schemaNames.get(key)!)}: ${JSON.stringify(validator.build(schema))},\n`;
+    }
+    out += `};\n\n`;
+  }
+
   for (const svc of services) {
     out += section(svc.name);
     for (const m of svc.methods) out += requestAndResponse(m, types, style);
     out += serviceInterface(svc, style);
-    out += serviceDefinition(svc);
+    out += serviceDefinition(svc, validator);
     out += serviceClient(svc);
   }
 
@@ -348,7 +367,7 @@ function serviceInterface(svc: ServiceInfo, style: ObjectStyle): string {
   return docComment('', svc.description) + objectDecl(style, svc.name, members);
 }
 
-function serviceDefinition(svc: ServiceInfo): string {
+function serviceDefinition(svc: ServiceInfo, validator: RuntimeSchemaBuilder | undefined): string {
   let out = `/** HTTP transcoding rules for ${svc.name}. */\n`;
   out += `export const ${svc.name}Definition = {\n  typeName: ${literal(svc.name)},\n  methods: {\n`;
   for (const m of svc.methods) {
@@ -369,7 +388,15 @@ function serviceDefinition(svc: ServiceInfo): string {
     if (m.body) {
       out += `      body: { field: ${literal(m.body.field)}, contentType: ${literal(m.body.contentType)}, encoding: ${literal(m.body.encoding)} },\n`;
     }
-    out += `      response: { encoding: ${literal(m.response.encoding)} },\n`;
+    if (validator && m.response.encoding === 'json') {
+      const schema = JSON.stringify(validator.build(m.response.media?.schema));
+      out += `      response: {\n`;
+      out += `        encoding: 'json',\n`;
+      out += `        validate: (value: unknown) => validateValue(value, ${schema}, rpcSchemas),\n`;
+      out += `      },\n`;
+    } else {
+      out += `      response: { encoding: ${literal(m.response.encoding)} },\n`;
+    }
     out += `    },\n`;
   }
   return `${out}  },\n} as const satisfies ServiceDefinition;\n\n`;
