@@ -1,0 +1,240 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+tags:
+  - name: pets
+    description: Everything about your pets
+  - name: store
+    description: Orders
+paths:
+  /pets:
+    get:
+      tags: [pets]
+      operationId: listPets
+      summary: List pets
+      parameters:
+        - $ref: '#/components/parameters/PageSize'
+        - name: page_token
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          description: Filter by status (repeatable)
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/PetStatus' }
+      responses:
+        '200':
+          description: A page of pets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListPetsPage' }
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      tags: [pets]
+      operationId: createPet
+      summary: Create a pet
+      parameters:
+        - name: X-Request-Id
+          in: header
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewPet' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+        '409':
+          $ref: '#/components/responses/Error'
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [pets]
+      operationId: get_pet
+      summary: Get a pet
+      description: Returns a single pet.
+      responses:
+        '200':
+          description: The pet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+        '404':
+          $ref: '#/components/responses/Error'
+    patch:
+      tags: [pets]
+      operationId: updatePet
+      requestBody:
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                tag: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+    delete:
+      tags: [pets]
+      operationId: deletePet
+      deprecated: true
+      responses:
+        '204':
+          description: Deleted
+  /pets/{petId}/photo:
+    post:
+      tags: [pets]
+      summary: Upload a photo
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                caption: { type: string }
+      responses:
+        '200':
+          description: Photo URL
+          content:
+            text/plain:
+              schema: { type: string }
+  /store/orders:
+    post:
+      tags: [store]
+      operationId: placeOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Order' }
+      responses:
+        '200':
+          description: Placed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+  /store/inventory:
+    get:
+      tags: [store]
+      operationId: getInventory
+      responses:
+        '200':
+          description: Map of status to quantity
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: integer }
+  /health:
+    get:
+      responses:
+        '200':
+          description: OK
+components:
+  parameters:
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100 }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    PetStatus:
+      type: string
+      description: Lifecycle of a pet in the store
+      enum: [available, pending-review, sold]
+    Pet:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        tag: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/PetStatus' }
+        birthday: { type: string, format: date }
+        attributes:
+          type: object
+          additionalProperties: { type: string }
+        owner:
+          oneOf:
+            - $ref: '#/components/schemas/Person'
+            - $ref: '#/components/schemas/Shop'
+        legacy-code:
+          type: string
+          deprecated: true
+    NewPet:
+      allOf:
+        - type: object
+          required: [name]
+          properties:
+            name: { type: string }
+            tag: { type: string }
+        - type: object
+          properties:
+            status: { $ref: '#/components/schemas/PetStatus' }
+    ListPetsPage:
+      type: object
+      required: [pets]
+      properties:
+        pets:
+          type: array
+          items: { $ref: '#/components/schemas/Pet' }
+        next_page_token: { type: string }
+    Person:
+      type: object
+      required: [kind, name]
+      properties:
+        kind: { type: string, enum: [person] }
+        name: { type: string }
+    Shop:
+      type: object
+      required: [kind, shopId]
+      properties:
+        kind: { type: string, enum: [shop] }
+        shopId: { type: string }
+    Order:
+      type: object
+      properties:
+        id: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            required: [petId, quantity]
+            properties:
+              petId: { type: integer }
+              quantity: { type: integer }
+        complete: { type: boolean, default: false }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }
