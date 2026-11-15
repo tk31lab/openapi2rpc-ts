@@ -1,34 +1,62 @@
 # openapi2rpc-ts
 
-OpenAPI 3.x（YAML / JSON）の定義から、**gRPC ライクな TypeScript クライアント**を生成するツールです。
+**手元の `openapi.yaml` だけで、gRPC ライクな TypeScript クライアントを作るツールです。**
 
-通信は普通の HTTP/JSON（fetch）のままで、呼び出し側のコードは gRPC のように書けます。
+gRPC の「サービス・メッセージ・ステータスコード」という書き心地は好きでも、実際に使おうとすると手間がかかります。
 
-- tag ごとに **サービス**（`PetsService`）を作る
-- 各 API は **1 リクエスト・1 レスポンス**のメソッド（`getPet(request): Promise<GetPetResponse>`）
-- path / query / header パラメータと body を **1 つのリクエストメッセージ**にまとめる
-- エラーは HTTP ステータスではなく **gRPC ステータスコード**（`Code.NOT_FOUND` など）で扱う
-- **CallOptions**（metadata / deadline / cancel）と **インターセプター**が使える
+- API 定義とは別に、`.proto` を書いて管理する
+- `protoc` や `buf`、言語ごとのプラグインをそろえ、バージョンを合わせる
+- サーバーを gRPC / Connect に対応させ、ブラウザから呼ぶなら中継（grpc-web や Envoy など）も用意する
+- 今ある REST API は、そもそもこの仕組みに乗せられない
+
+openapi2rpc-ts は、この手間を全部省いて **書き心地だけ**を持ってきます。
+
+```bash
+npx openapi2rpc-ts -i openapi.yaml -o src/gen/api.ts
+```
 
 ```ts
-import { createClients, createFetchTransport, Code, RpcError } from './gen/petstore.js';
+import { createClients, createFetchTransport, Code, RpcError, TaskStatus } from './gen/api.js';
 
-const clients = createClients(
-  createFetchTransport({
-    baseUrl: 'https://api.example.com/v1',
-    metadata: async () => ({ authorization: `Bearer ${await getToken()}` }),
-  }),
-);
+const { tasks } = createClients(createFetchTransport({ baseUrl: 'https://api.example.com/v1' }));
 
 try {
-  const pet = await clients.pets.getPet({ petId: 42 }, { timeoutMs: 3000 });
-  console.log(pet.name);
+  const page = await tasks.listTasks({ projectId: 'p1', status: [TaskStatus.TODO] }, { timeoutMs: 3000 });
+  for (const t of page.tasks) console.log(t.title);
 } catch (err) {
   if (err instanceof RpcError && err.code === Code.NOT_FOUND) {
-    // ...
+    // HTTP ステータスではなく、意味（gRPC のコード）で分岐できる
   }
 }
 ```
+
+- 入力は、たいていすでにある `openapi.yaml` だけです。proto も protoc も要りません。
+- 出力は TS ファイル 1 つで、実行時に必要なパッケージもありません。
+- サーバーは今の REST API のままで、通信も普通の HTTP/JSON（fetch）です。
+
+## gRPC との比較
+
+| | gRPC / Connect | openapi2rpc-ts |
+|---|---|---|
+| 定義 | `.proto` を新たに書く | 既存の `openapi.yaml` |
+| ツール | protoc / buf / プラグイン | `npx` 1 回 |
+| サーバー側 | gRPC / Connect 対応が必要 | 変更なし（既存の REST API のまま） |
+| ブラウザ | grpc-web / Connect が必要 | fetch で動く |
+| 呼び出し | `client.getTask(request)` | `client.getTask(request)` |
+| エラー | ステータスコード | ステータスコード（HTTP から自動変換） |
+| deadline / cancel / interceptor | あり | あり |
+| バイナリ形式・ストリーミング | あり | なし（HTTP/JSON の 1 往復のみ） |
+
+通信の効率化やストリーミングといった gRPC の**通信そのもの**の利点はあきらめて、**呼び方とエラーの扱い方**の統一に絞っています。フロントエンドや一般的な API 連携で困るのは、たいてい後者だからです。
+
+## 書き心地
+
+- tag ごとに **サービス**（`TasksService`）を作る
+- 各 API は **1 リクエスト・1 レスポンス**のメソッド（`getTask(request): Promise<GetTaskResponse>`）
+- path / query / header パラメータと body を **1 つのリクエストメッセージ**にまとめる
+- エラーは HTTP ステータスではなく **gRPC ステータスコード**（`Code.NOT_FOUND` など）で扱う
+- 呼び出しごとの **CallOptions**（metadata / deadline / cancel）と **インターセプター**が使える
+- `Transport` はメソッドが 1 つだけなので、テスト用のモックも簡単に作れる
 
 ## 使い方
 
