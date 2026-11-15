@@ -19,6 +19,20 @@ export interface GenerateOptions {
    * e.g. `./rpc-runtime.js`. Useful when generating several clients.
    */
   runtimeImport?: string;
+  /**
+   * How object types (messages, requests, services) are declared.
+   * - `interface` (default): `export interface Task { ... }`
+   * - `type`: `export type Task = { ... };` — assignable to `Record<string, unknown>`
+   */
+  objectStyle?: ObjectStyle;
+}
+
+export type ObjectStyle = 'interface' | 'type';
+
+/** Declares an object type; `members` is the text between the braces. */
+function objectDecl(style: ObjectStyle, name: string, members: string): string {
+  if (style === 'type') return members ? `export type ${name} = {\n${members}};\n\n` : `export type ${name} = Record<string, never>;\n\n`;
+  return members ? `export interface ${name} {\n${members}}\n\n` : `export interface ${name} {}\n\n`;
 }
 
 export interface GenerateResult {
@@ -66,6 +80,8 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
   const warnings: string[] = [];
   const warn = (m: string) => warnings.push(m);
   const runtime = runtimeSource();
+  const style: ObjectStyle = options.objectStyle ?? 'interface';
+  if (style !== 'interface' && style !== 'type') throw new Error(`invalid objectStyle "${String(style)}" (expected "interface" or "type")`);
 
   // Names that generated declarations must not shadow: runtime declarations and common globals.
   const used = new Set<string>([
@@ -103,7 +119,7 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
     const info = typeof schema === 'object' && !isRef(schema) ? schema : undefined;
     out += docComment('', info?.title && info.description ? info.title : undefined, info?.description ?? info?.title, info?.deprecated && '@deprecated');
     if (types.isPlainObject(schema)) {
-      out += `export interface ${name} {\n${types.renderObjectMembers(schema, '')}}\n\n`;
+      out += objectDecl(style, name, types.renderObjectMembers(schema, ''));
       continue;
     }
     out += `export type ${name} = ${types.render(schema)};\n`;
@@ -118,8 +134,8 @@ export function generate(doc: Document, options: GenerateOptions = {}): Generate
 
   for (const svc of services) {
     out += section(svc.name);
-    for (const m of svc.methods) out += requestAndResponse(m, types);
-    out += serviceInterface(svc);
+    for (const m of svc.methods) out += requestAndResponse(m, types, style);
+    out += serviceInterface(svc, style);
     out += serviceDefinition(svc);
     out += serviceClient(svc);
   }
@@ -280,22 +296,22 @@ function successResponse(doc: Document, op: Operation): MethodInfo['response'] {
   return { encoding, media: picked.media, description: res.description };
 }
 
-function requestAndResponse(m: MethodInfo, types: TypeRenderer): string {
+function requestAndResponse(m: MethodInfo, types: TypeRenderer, style: ObjectStyle): string {
   let out = docComment('', `Request message for \`${m.name}\`.`);
-  out += `export interface ${m.requestType} {\n`;
+  let members = '';
   for (const { field, param } of m.fields) {
     const info = typeof param.schema === 'object' && !isRef(param.schema) ? param.schema : undefined;
-    out += docComment('  ', param.description, `@in ${param.in} \`${param.name}\``, info?.format && `@format ${info.format}`, (param.deprecated || info?.deprecated) && '@deprecated');
+    members += docComment('  ', param.description, `@in ${param.in} \`${param.name}\``, info?.format && `@format ${info.format}`, (param.deprecated || info?.deprecated) && '@deprecated');
     const required = param.required || param.in === 'path';
-    out += `  ${propKey(field)}${required ? '' : '?'}: ${types.render(param.schema, '  ')};\n`;
+    members += `  ${propKey(field)}${required ? '' : '?'}: ${types.render(param.schema, '  ')};\n`;
   }
   if (m.body) {
     const b = m.body;
     const type = b.encoding === 'text' ? 'string' : b.encoding === 'binary' ? 'Blob' : types.render(b.media.schema, '  ');
-    out += docComment('  ', b.description, `@in body (\`${b.contentType}\`)`);
-    out += `  ${propKey(b.field)}${b.required ? '' : '?'}: ${type};\n`;
+    members += docComment('  ', b.description, `@in body (\`${b.contentType}\`)`);
+    members += `  ${propKey(b.field)}${b.required ? '' : '?'}: ${type};\n`;
   }
-  out = out.endsWith('{\n') ? `${out.slice(0, -1)}}\n\n` : `${out}}\n\n`;
+  out += objectDecl(style, m.requestType, members);
 
   const resType =
     m.response.encoding === 'none' ? 'Empty'
@@ -323,14 +339,13 @@ function methodDoc(m: MethodInfo, indent: string): string {
   );
 }
 
-function serviceInterface(svc: ServiceInfo): string {
-  let out = docComment('', svc.description);
-  out += `export interface ${svc.name} {\n`;
+function serviceInterface(svc: ServiceInfo, style: ObjectStyle): string {
+  let members = '';
   for (const m of svc.methods) {
-    out += methodDoc(m, '  ');
-    out += `  ${m.name}(request${requestIsOptional(m) ? '?' : ''}: ${m.requestType}, options?: CallOptions): Promise<${m.responseType}>;\n`;
+    members += methodDoc(m, '  ');
+    members += `  ${m.name}(request${requestIsOptional(m) ? '?' : ''}: ${m.requestType}, options?: CallOptions): Promise<${m.responseType}>;\n`;
   }
-  return `${out}}\n\n`;
+  return docComment('', svc.description) + objectDecl(style, svc.name, members);
 }
 
 function serviceDefinition(svc: ServiceInfo): string {

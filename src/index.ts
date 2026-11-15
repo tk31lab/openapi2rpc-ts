@@ -1,9 +1,9 @@
 import { parse as parseYaml } from 'yaml';
-import { generate, runtimeSource, type GenerateOptions, type GenerateResult } from './generator.js';
+import { generate, runtimeSource, type GenerateOptions, type GenerateResult, type ObjectStyle } from './generator.js';
 import type { Document } from './spec.js';
 
 export { generate, runtimeSource };
-export type { Document, GenerateOptions, GenerateResult };
+export type { Document, GenerateOptions, GenerateResult, ObjectStyle };
 
 /** Parses an OpenAPI 3.x document from YAML or JSON text. */
 export function parseSpec(text: string): Document {

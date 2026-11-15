@@ -24,6 +24,44 @@ describe('generate', () => {
     expect(typecheck({ 'client.ts': code, 'runtime.ts': runtimeSource() })).toEqual([]);
   });
 
+  describe('objectStyle', () => {
+    // a generic helper that only accepts index-signature-compatible objects
+    const usage = `import type { Pet, GetPetRequest, GetInventoryRequest, StoreService } from './client.js';
+import { StoreServiceClient } from './client.js';
+declare function log(value: Record<string, unknown>): void;
+declare const pet: Pet;
+declare const req: GetPetRequest;
+log(pet);
+log(req);
+const empty: GetInventoryRequest = {};
+const svc: StoreService = new StoreServiceClient({ unary: async () => ({}) as never });
+export { empty, svc };
+`;
+
+    it('declares objects with type aliases when objectStyle is "type"', () => {
+      const { code } = generateFromText(petstore, { objectStyle: 'type' });
+      expect(code).toContain('export type Pet = {\n  /** @format int64 */\n  id: number;');
+      expect(code).toContain('export type GetPetRequest = {\n');
+      expect(code).toContain('export type GetInventoryRequest = Record<string, never>;');
+      expect(code).toContain('export type PetsService = {\n');
+      expect(code).toContain('export class PetsServiceClient implements PetsService {');
+      expect(code).not.toMatch(/^export interface (?!RpcErrorInit|ParamDescriptor|BodyDescriptor|ResponseDescriptor|MethodDescriptor|ServiceDefinition|CallOptions|UnaryRequest|UnaryResponse|Transport|FetchTransportOptions)/m);
+      expect(typecheck({ 'client.ts': code, 'usage.ts': usage })).toEqual([]);
+    });
+
+    it('keeps interfaces by default (not assignable to Record<string, unknown>)', () => {
+      const { code } = generateFromText(petstore);
+      expect(code).toContain('export interface Pet {');
+      const errors = typecheck({ 'client.ts': code, 'usage.ts': usage });
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.every((e) => e.startsWith('usage.ts:') && e.includes('Index signature'))).toBe(true);
+    });
+
+    it('rejects unknown styles', () => {
+      expect(() => generateFromText(petstore, { objectStyle: 'class' as never })).toThrow(/invalid objectStyle/);
+    });
+  });
+
   it('supports OpenAPI 3.1 type arrays, const and boolean schemas', () => {
     const { code } = generateFromText(`
 openapi: 3.1.0

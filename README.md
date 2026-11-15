@@ -70,6 +70,7 @@ npx openapi2rpc-ts -i openapi.yaml -o src/gen/api.ts
 | `-o, --output <file>` | 出力先（省略時は標準出力） |
 | `--runtime-import <module>` | ランタイムを埋め込まず、指定モジュールから import する |
 | `--emit-runtime <file>` | ランタイムを別ファイルとして書き出す |
+| `--object-style <style>` | object 型を `interface`（デフォルト）と `type` のどちらで宣言するか |
 
 デフォルトでは、ランタイム（`Code` / `RpcError` / `createFetchTransport` など）を生成ファイルに埋め込みます。そのため、出力ファイルは 1 つで完結し、実行時の依存パッケージもありません。
 
@@ -115,6 +116,28 @@ export interface PetsService {
   // ...
 }
 ```
+
+### `interface` と `type` の切り替え（`--object-style`）
+
+メッセージ・リクエスト・サービスのような object 型は、デフォルトでは `interface` で出力します。
+
+- TypeScript 公式も推奨している書き方で、型が多いときの型チェックが速い
+- エラーメッセージやホバーで、型名（`Task`）のまま表示される
+
+ただし interface には暗黙のインデックスシグネチャがないため、`Record<string, unknown>` を受け取る汎用関数に渡すと型エラーになります。気になる場合は `--object-style type` を指定してください。
+
+```ts
+// --object-style interface（デフォルト）
+export interface Task { id: string; title: string; /* ... */ }
+
+// --object-style type
+export type Task = { id: string; title: string; /* ... */ };
+
+declare function log(value: Record<string, unknown>): void;
+log(task); // interface だとエラー、type なら OK
+```
+
+union・intersection・enum など、object 以外の型はどちらの設定でも常に `type` です。
 
 ### 命名ルール
 

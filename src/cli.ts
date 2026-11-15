@@ -13,6 +13,7 @@ Options:
   -o, --output <file>           Output file (default: stdout)
       --runtime-import <module> Import the runtime from <module> instead of embedding it
       --emit-runtime <file>     Write the runtime to <file> (use with --runtime-import)
+      --object-style <style>    Declare object types as "interface" (default) or "type"
   -h, --help                    Show this help
 `;
 
@@ -30,6 +31,7 @@ function main(): number {
         output: { type: 'string', short: 'o' },
         'runtime-import': { type: 'string' },
         'emit-runtime': { type: 'string' },
+        'object-style': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     }).values;
@@ -41,6 +43,11 @@ function main(): number {
     process.stdout.write(USAGE);
     return 0;
   }
+  const objectStyle = args['object-style'] ?? 'interface';
+  if (objectStyle !== 'interface' && objectStyle !== 'type') {
+    process.stderr.write(`openapi2rpc-ts: --object-style must be "interface" or "type" (got "${objectStyle}")\n`);
+    return 2;
+  }
   if (args['emit-runtime']) writeOut(args['emit-runtime'], runtimeSource());
   if (!args.input) {
     if (args['emit-runtime']) return 0;
@@ -51,7 +58,7 @@ function main(): number {
   const text = readFileSync(args.input === '-' ? 0 : args.input, 'utf8');
   let result;
   try {
-    result = generateFromText(text, { runtimeImport: args['runtime-import'] });
+    result = generateFromText(text, { runtimeImport: args['runtime-import'], objectStyle });
   } catch (err) {
     process.stderr.write(`openapi2rpc-ts: ${(err as Error).message}\n`);
     return 1;
